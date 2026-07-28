@@ -1,0 +1,15 @@
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+
+# intermediate caches & logs
+temp/
+*.log
+
+# run outputs (large images/meshes; results documented in REPORT.md)
+output/
+report/
+
+# models
+assets/
