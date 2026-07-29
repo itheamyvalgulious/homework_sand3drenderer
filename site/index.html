@@ -1,0 +1,871 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAND: Spatially Adaptive Network Depth for Fast Sampling of Neural Implicit Surfaces</title>
+<link rel="stylesheet" href="vendor/katex.min.css">
+<style>
+  :root {
+    --ink: #0b2447;
+    --ink-soft: #40587a;
+    --blue: #2b6cb0;
+    --blue-2: #3182ce;
+    --blue-glow: rgba(99, 179, 237, .45);
+    --glass-border: rgba(255, 255, 255, .85);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+    color: var(--ink);
+    background: linear-gradient(160deg, #e9f2fc 0%, #f7fbff 45%, #e3eefa 100%);
+    background-attachment: fixed;
+    line-height: 1.75;
+  }
+
+  /* ============ 背景层(全局,slide 本身透明) ============ */
+  #bg3d { position: fixed; inset: 0; z-index: -2; pointer-events: none; }
+  .blob {
+    position: fixed; border-radius: 50%; filter: blur(90px);
+    z-index: -3; pointer-events: none; opacity: .5;
+    animation: drift 26s ease-in-out infinite alternate;
+  }
+  .blob.b1 { width: 46vw; height: 46vw; left: -12vw; top: -14vh; background: #b3d7f7; }
+  .blob.b2 { width: 38vw; height: 38vw; right: -10vw; top: 32vh; background: #c9e4fb; animation-delay: -8s; }
+  .blob.b3 { width: 34vw; height: 34vw; left: 22vw; bottom: -18vh; background: #a9cdf2; animation-delay: -16s; }
+  @keyframes drift {
+    from { transform: translate3d(0,0,0) scale(1); }
+    to   { transform: translate3d(6vw, -5vh, 0) scale(1.15); }
+  }
+
+  /* ============ 顶栏:标题直接分布在进度条上 ============ */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+    padding: 10px 26px 0;
+  }
+  #topbar .track {
+    position: relative; height: 44px;
+  }
+  #topbar .rail {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 2px;
+    background: rgba(43,108,176,.15);
+  }
+  #topbar .fill {
+    position: absolute; left: 0; bottom: 0; height: 3px; width: 0; border-radius: 2px;
+    background: linear-gradient(90deg, var(--blue), #63b3ed);
+    box-shadow: 0 0 10px var(--blue-glow);
+    transition: width .6s cubic-bezier(.3,.9,.3,1);
+  }
+  #topbar .seg {
+    position: absolute; bottom: 0; transform: translateX(0);
+    display: flex; flex-direction: column; align-items: flex-start;
+    font-size: 12.5px; font-weight: 600; color: rgba(64,88,122,.55);
+    white-space: nowrap; cursor: pointer; transition: color .3s;
+    padding-bottom: 10px;
+  }
+  #topbar .seg .dot {
+    position: absolute; left: 0; bottom: -3.5px; width: 10px; height: 10px; border-radius: 50%;
+    background: #fff; border: 2px solid rgba(43,108,176,.35);
+    transition: all .3s;
+  }
+  #topbar .seg .lbl { padding-left: 0; }
+  #topbar .seg.reached { color: var(--ink); }
+  #topbar .seg.reached .dot { border-color: var(--blue); }
+  #topbar .seg.cur { color: var(--blue); }
+  #topbar .seg.cur .dot {
+    background: var(--blue); border-color: #fff;
+    box-shadow: 0 0 0 3px var(--blue-glow), 0 0 12px var(--blue-glow);
+  }
+  #topbar .pageinfo {
+    position: absolute; right: 0; bottom: 10px;
+    font-size: 12.5px; font-variant-numeric: tabular-nums; color: var(--ink-soft);
+  }
+  #topbar .pageinfo b { color: var(--blue); }
+
+  /* ============ Slide 引擎:一次到位的回弹翻页 ============ */
+  .slide {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 84px 6vw 64px;
+    visibility: hidden; opacity: 0;
+    transform: translateY(4vh);
+  }
+  .slide.active { visibility: visible; opacity: 1; transform: none; }
+
+  /* 进入:从场外一次滑到 0,回弹曲线;退出:反向滑出 */
+  @keyframes in-h-fwd  { from { transform: translateX(60vw);  opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes in-h-back { from { transform: translateX(-60vw); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes in-v-fwd  { from { transform: translateY(60vh);  opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes in-v-back { from { transform: translateY(-60vh); opacity: 0; } to { transform: none; opacity: 1; } }
+  @keyframes out-h-fwd  { to { transform: translateX(-60vw); opacity: 0; } }
+  @keyframes out-h-back { to { transform: translateX(60vw);  opacity: 0; } }
+  @keyframes out-v-fwd  { to { transform: translateY(-60vh); opacity: 0; } }
+  @keyframes out-v-back { to { transform: translateY(60vh);  opacity: 0; } }
+
+  .slide.enter-h-fwd  { animation: in-h-fwd  .75s cubic-bezier(.3, .9, .25, 1) both; }
+  .slide.enter-h-back { animation: in-h-back .75s cubic-bezier(.3, .9, .25, 1) both; }
+  .slide.enter-v-fwd  { animation: in-v-fwd  .75s cubic-bezier(.3, .9, .25, 1) both; }
+  .slide.enter-v-back { animation: in-v-back .75s cubic-bezier(.3, .9, .25, 1) both; }
+  .slide.exit-h-fwd   { animation: out-h-fwd  .4s cubic-bezier(.6, 0, .8, .4) both; }
+  .slide.exit-h-back  { animation: out-h-back .4s cubic-bezier(.6, 0, .8, .4) both; }
+  .slide.exit-v-fwd   { animation: out-v-fwd  .4s cubic-bezier(.6, 0, .8, .4) both; }
+  .slide.exit-v-back  { animation: out-v-back .4s cubic-bezier(.6, 0, .8, .4) both; }
+
+  .slide .inner { width: min(1160px, 100%); }
+  .slide .inner.narrow { width: min(880px, 100%); }
+  .center { text-align: center; }
+
+  /* ============ 标题:渐变流动动画(同 play 按钮的 sheen) ============ */
+  .grad-text {
+    background: linear-gradient(110deg, #123f73 25%, #3182ce 45%, #63b3ed 55%, #123f73 75%);
+    background-size: 240% 100%;
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    animation: textSheen 6s linear infinite;
+  }
+  @keyframes textSheen { to { background-position: -240% 0; } }
+
+  h1.deck-title {
+    font-size: clamp(44px, 6.2vw, 78px); line-height: 1.26; font-weight: 800;
+    letter-spacing: -.01em; margin: 0 0 34px; max-width: 1280px;
+  }
+  .authors {
+    font-size: clamp(26px, 2.8vw, 34px); color: var(--ink-soft); font-weight: 600;
+    letter-spacing: .12em;
+  }
+  .authors b { color: var(--blue); }
+
+  h2.slide-title {
+    font-size: clamp(38px, 4.6vw, 56px); font-weight: 800; margin: 0 0 20px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  h2.slide-title::before {
+    content: ""; width: 12px; height: 44px; border-radius: 6px; flex: none;
+    background: linear-gradient(180deg, #3182ce, #63b3ed);
+    box-shadow: 0 4px 12px var(--blue-glow);
+  }
+  h3.sub {
+    font-size: clamp(28px, 3vw, 36px); font-weight: 700; color: var(--blue);
+    margin: 0 0 14px; padding-bottom: 8px;
+    border-bottom: 1px solid rgba(43,108,176,.18);
+  }
+  p { margin: 13px 0; font-size: clamp(24px, 2.1vw, 28px); }
+  .lead { font-size: clamp(28px, 2.7vw, 36px); }
+  .dim { color: var(--ink-soft); }
+  ::selection { background: rgba(99,179,237,.4); }
+
+  /* ============ Introduction 版式 ============ */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 20px; align-items: stretch; margin: 20px 0; }
+  .flow .lane {
+    border-radius: 18px; padding: 20px 24px; font-size: clamp(22px, 1.9vw, 26px); line-height: 1.75;
+    border: 1px solid rgba(43,108,176,.16); background: rgba(255,255,255,.5);
+  }
+  .flow .lane .tag {
+    display: inline-block; font-size: clamp(17px, 1.4vw, 20px); font-weight: 700; letter-spacing: .08em;
+    padding: 3px 13px; border-radius: 999px; margin-bottom: 10px;
+  }
+  .flow .lane.old .tag { background: rgba(64,88,122,.12); color: var(--ink-soft); }
+  .flow .lane.new {
+    background: linear-gradient(150deg, rgba(49,130,206,.13), rgba(99,179,237,.09));
+    border-color: rgba(49,130,206,.35);
+  }
+  .flow .lane.new .tag { background: var(--blue); color: #fff; box-shadow: 0 4px 12px var(--blue-glow); }
+  .flow .vs { align-self: center; font-weight: 800; color: var(--blue-2); font-size: clamp(18px, 1.6vw, 22px); letter-spacing: .1em; }
+  .advantages {
+    display: inline-flex; align-items: center; gap: 10px; margin-top: 14px;
+    padding: 11px 24px; border-radius: 999px; font-size: clamp(22px, 1.9vw, 26px); font-weight: 600; color: #123f73;
+    background: linear-gradient(90deg, rgba(49,130,206,.14), rgba(99,179,237,.08));
+    border: 1px solid rgba(49,130,206,.3);
+  }
+  .advantages::before { content: "✦"; color: var(--blue-2); }
+
+  /* ============ 表格 ============ */
+  .tblwrap { overflow-x: auto; margin: 16px 0; border-radius: 14px; }
+  table.data {
+    border-collapse: separate; border-spacing: 0; width: 100%;
+    font-size: clamp(19px, 1.75vw, 23px); background: rgba(255,255,255,.55);
+    border: 1px solid rgba(43,108,176,.16); border-radius: 14px; overflow: hidden;
+  }
+  table.data th, table.data td { padding: 11px 15px; text-align: center; white-space: nowrap; }
+  table.data th {
+    background: linear-gradient(90deg, rgba(49,130,206,.15), rgba(99,179,237,.10));
+    color: #123f73; font-weight: 700; border-bottom: 1px solid rgba(43,108,176,.2);
+  }
+  table.data tbody tr:nth-child(even) { background: rgba(49,130,206,.05); }
+  table.data td.best { color: var(--blue); font-weight: 700; }
+  table.data td.num { font-variant-numeric: tabular-nums; }
+
+  /* ============ 图像面板(尺寸随视口缩放,保证一屏放下) ============ */
+  .panelgrid { display: grid; gap: 12px; margin: 12px 0; }
+  .panelgrid .prow {
+    display: grid; grid-template-columns: 180px 1fr 1fr; gap: 14px; align-items: center;
+    padding: 10px 14px; border-radius: 16px;
+    background: rgba(255,255,255,.48); border: 1px solid rgba(43,108,176,.14);
+  }
+  .panelgrid .phead { text-align: center; font-size: clamp(19px, 1.7vw, 23px); font-weight: 700; color: #123f73; }
+  .panelgrid .pname { font-size: clamp(20px, 1.8vw, 24px); font-weight: 600; color: var(--ink-soft); }
+  figure.shot { margin: 0; text-align: center; }
+  figure.shot img {
+    width: min(23vh, 300px); border-radius: 12px; display: inline-block;
+    border: 1px solid rgba(255,255,255,.9);
+    box-shadow: 0 8px 24px rgba(30,90,160,.15);
+    cursor: zoom-in;
+    transition: transform .35s cubic-bezier(.2,.7,.3,1), box-shadow .35s ease;
+  }
+  figure.shot img:hover {
+    transform: scale(1.06);
+    box-shadow: 0 18px 44px rgba(30,90,160,.26);
+  }
+
+  /* 点击放大(lightbox) */
+  #lightbox {
+    position: fixed; inset: 0; z-index: 90;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(11, 36, 71, .42);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    opacity: 0; visibility: hidden;
+    transition: opacity .3s ease, visibility 0s linear .3s;
+    cursor: zoom-out;
+  }
+  #lightbox.open { opacity: 1; visibility: visible; transition: opacity .3s ease; }
+  #lightbox img {
+    max-width: 88vw; max-height: 86vh; border-radius: 14px;
+    box-shadow: 0 30px 90px rgba(11,36,71,.5);
+    border: 1px solid rgba(255,255,255,.85);
+    transform: scale(.92); transition: transform .3s cubic-bezier(.2,.8,.3,1);
+  }
+  #lightbox.open img { transform: none; }
+  figure.shot figcaption { font-size: clamp(15px, 1.3vw, 18px); color: var(--ink-soft); margin-top: 4px; }
+  .dash { text-align: center; color: var(--ink-soft); }
+  .duo { display: flex; gap: 26px; flex-wrap: wrap; justify-content: center; margin: 16px 0; }
+  .duo figure.shot img { width: min(30vh, 360px); }
+  .single figure.shot img { width: min(38vh, 420px); }
+
+  /* ============ Technique 版式 ============ */
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 18px 0; }
+  .usecase {
+    border-radius: 16px; padding: 18px 22px; font-size: clamp(22px, 1.9vw, 26px);
+    background: rgba(255,255,255,.5); border: 1px solid rgba(43,108,176,.16);
+  }
+  .usecase .t { font-weight: 700; color: #123f73; margin-bottom: 6px; }
+  .usecase .t::before { content: "▸ "; color: var(--blue-2); }
+
+  .formula {
+    margin: 14px 0; padding: 20px 18px; overflow-x: auto;
+    background: rgba(255,255,255,.55); border: 1px solid rgba(43,108,176,.14);
+    border-radius: 14px; text-align: center;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .formula .flabel {
+    display: block; text-align: left; font-size: clamp(17px, 1.5vw, 21px); font-weight: 700;
+    letter-spacing: .08em; color: var(--blue-2); margin-bottom: 8px; text-transform: uppercase;
+  }
+  /* T-MLP 页:左右对比布局,公式大字号 */
+  .formula-cmp { display: grid; grid-template-columns: 1fr 1.35fr; gap: 22px; align-items: stretch; margin: 18px 0; }
+  .formula-cmp .formula { margin: 0; overflow: visible; }
+  .formula-cmp .katex { font-size: clamp(26px, 2.3vw, 34px); }
+  .formula-cmp .formula.big { background: linear-gradient(150deg, rgba(49,130,206,.13), rgba(99,179,237,.09)); border-color: rgba(49,130,206,.35); }
+  .katex { font-size: 1.35em; }
+  .katex-display { margin: 0; }
+
+  ol.points { padding-left: 1.3em; }
+  ol.points li { margin: 10px 0; font-size: clamp(24px, 2.1vw, 28px); }
+  ul.clean { list-style: none; padding: 0; margin: 14px 0; }
+  ul.clean li {
+    position: relative; padding: 13px 18px 13px 46px; margin: 12px 0;
+    background: rgba(255,255,255,.5); border: 1px solid rgba(43,108,176,.14);
+    border-radius: 12px; font-size: clamp(22px, 1.95vw, 26px);
+  }
+  ul.clean li::before { content: "→"; position: absolute; left: 17px; top: 12px; color: var(--blue-2); font-weight: 700; }
+
+  /* ============ Bugs 版式 ============ */
+  .bug {
+    border-left: 4px solid var(--blue-2); border-radius: 0 16px 16px 0;
+    padding: 6px 0 6px 24px; margin: 18px 0;
+  }
+  .bug .fix {
+    display: inline-block; margin-top: 8px; font-size: clamp(20px, 1.8vw, 24px); font-weight: 600;
+    color: #123f73; padding: 7px 18px; border-radius: 999px;
+    background: rgba(49,130,206,.12); border: 1px solid rgba(49,130,206,.3);
+  }
+  .bug .fix::before { content: "✓ "; color: var(--blue-2); }
+
+  /* ============ Play / Thanks ============ */
+  .play-btn {
+    display: inline-flex; align-items: center; gap: 10px; text-decoration: none;
+    font-size: clamp(26px, 2.4vw, 32px); font-weight: 700; color: #fff; padding: 19px 52px; border-radius: 999px;
+    background: linear-gradient(120deg, #2b6cb0, #3182ce 55%, #63b3ed);
+    background-size: 200% 100%;
+    box-shadow: 0 12px 34px rgba(43,108,176,.4);
+    animation: sheen 5s linear infinite;
+  }
+  @keyframes sheen { to { background-position: 200% 0; } }
+  .thanks-big {
+    font-size: clamp(72px, 13vw, 170px); font-weight: 800; margin: 0;
+  }
+
+  /* ============ 方向指示 ============ */
+  #arrows {
+    position: fixed; right: 20px; bottom: 18px; z-index: 40;
+    display: grid; grid-template-columns: repeat(3, 26px); grid-template-rows: repeat(2, 26px);
+    gap: 3px; opacity: .9; user-select: none;
+  }
+  #arrows span {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: rgba(43,108,176,.28); border-radius: 6px;
+    background: rgba(255,255,255,.4); border: 1px solid rgba(255,255,255,.6);
+    transition: color .3s, box-shadow .3s;
+  }
+  #arrows span.on { color: var(--blue); box-shadow: 0 0 10px var(--blue-glow); }
+  #arrows .a-up { grid-column: 2; grid-row: 1; }
+  #arrows .a-left { grid-column: 1; grid-row: 2; }
+  #arrows .a-down { grid-column: 2; grid-row: 2; }
+  #arrows .a-right { grid-column: 3; grid-row: 2; }
+  #hint {
+    position: fixed; left: 20px; bottom: 18px; z-index: 40;
+    font-size: 12px; color: rgba(64,88,122,.55); letter-spacing: .06em;
+  }
+
+  @media (max-width: 760px) {
+    .flow, .twocol, .formula-cmp { grid-template-columns: 1fr; }
+    .flow .vs { text-align: center; }
+    .panelgrid .prow { grid-template-columns: 1fr; text-align: center; }
+    #topbar .seg .lbl { font-size: 10.5px; }
+    #hint { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, .blob { animation: none !important; }
+    .slide, .slide.active { transition-duration: .01s !important; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="bg3d"></canvas>
+<div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+
+<div id="topbar">
+  <div class="track" id="track">
+    <div class="rail"></div>
+    <div class="fill" id="barfill"></div>
+  </div>
+</div>
+
+<div class="deck">
+
+<!-- ================= Section 0 · 封面 ================= -->
+<section data-title="封面">
+  <div class="slide">
+    <div class="inner center">
+      <h1 class="deck-title grad-text">SAND: Spatially Adaptive Network Depth for Fast Sampling of Neural Implicit Surfaces</h1>
+      <div class="authors">13 组 &nbsp;·&nbsp; <b>孔德玮</b> &nbsp; <b>颜祖一</b></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Section 1 · Introduction ================= -->
+<section data-title="Introduction">
+  <div class="slide">
+    <div class="inner">
+      <h2 class="slide-title grad-text">Introduction</h2>
+      <p class="lead">我们要解决的核心问题是如何<strong>快速准确的渲染一个模型</strong>。</p>
+      <div class="flow">
+        <div class="lane old">
+          <span class="tag">传统方法</span>
+          <p>把模型存储为很多小三角面的并集,然后通过光线追踪或把面投影到屏幕上渲染。</p>
+        </div>
+        <div class="vs">VS</div>
+        <div class="lane new">
+          <span class="tag">隐式神经网络表达</span>
+          <p>通过其他方法:用一个标量场描述模型,把传统的模型转化为训练好的权重数据。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h2 class="slide-title grad-text">Introduction</h2>
+      <p>设模型在空间中占据的点的集合为 $V$(严谨的话,可以是闭集),则可以定义一个标量场 $f(\vec x)=\mathrm{sgn}(x)\mathrm{dis}(x,\partial V)$ 为点 $x$ 到模型表面的有符号距离(一般里面是负的外面是正的),则 $f(\vec x)=0$ 确定了模型表面。</p>
+      <p>而隐式神经网络表示就是<strong>监督训练一个网络来拟合 $f$</strong>,来把传统的模型转化为训练好的权重数据。</p>
+      <p>渲染时常使用 <strong>ray marching</strong> 方法:光线投射的隐式神经网络版。</p>
+      <div class="advantages">优势:无损表达光滑表面,利用泛化能力减小存储消耗</div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Section 2 · Results ================= -->
+<section data-title="Results">
+  <div class="slide">
+    <h2 class="slide-title grad-text">Conditions</h2>
+    <p>实验复现条件</p>
+    <ol class="points">
+      <li>原论文 RTX4090$\to$ GTX1650(my computer)</li>
+      <li>分辨率:$512^3\to 256^3$</li>
+    </ol>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h2 class="slide-title grad-text">Results</h2>
+      <h3 class="sub">Suzanne 猴头</h3>
+      <p class="dim">6.2 万面。</p>
+      <div class="tblwrap">
+        <table class="data">
+          <thead>
+            <tr><th>网络</th><th>RM 总时长 (s)</th><th>RM 网络 (s)</th><th>RM 零网络查询占比</th><th>RM 平均深度</th><th>RM 时长比</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>baseline (无纹理)</td><td class="num">2.86</td><td class="num">2.47</td><td class="num">0.000</td><td class="num">8.00</td><td>—</td></tr>
+            <tr><td>SAND (无纹理)</td><td class="num">10.17</td><td class="num">4.71</td><td class="num">0.868</td><td class="num">3.69</td><td class="best">3.56x</td></tr>
+            <tr><td>SAND+纹理扩展</td><td class="num">10.81</td><td class="num">5.06</td><td class="num">0.863</td><td class="num">4.97</td><td class="best">3.78x</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h3 class="sub">Suzanne 猴头 · 渲染结果</h3>
+      <div class="panelgrid">
+        <div class="prow" style="background:transparent;border:none;padding:0 14px;">
+          <div class="pname"></div><div class="phead">Ray Marching</div><div class="phead">RM 深度图</div>
+        </div>
+        <div class="prow">
+          <div class="pname">baseline (无纹理)</div>
+          <figure class="shot"><img src="report/suzanne/rm_base_geo.png" alt="rm_base_geo"><figcaption>rm_base_geo</figcaption></figure>
+          <div class="dash">—</div>
+        </div>
+        <div class="prow">
+          <div class="pname">SAND (无纹理)</div>
+          <figure class="shot"><img src="report/suzanne/rm_sand_geo.png" alt="rm_sand_geo"><figcaption>rm_sand_geo</figcaption></figure>
+          <figure class="shot"><img src="report/suzanne/rm_depth_sand_geo.png" alt="rm_depth_sand_geo"><figcaption>rm_depth_sand_geo</figcaption></figure>
+        </div>
+        <div class="prow">
+          <div class="pname">SAND+纹理扩展</div>
+          <figure class="shot"><img src="report/suzanne/rm_sand_color.png" alt="rm_sand_color"><figcaption>rm_sand_color</figcaption></figure>
+          <figure class="shot"><img src="report/suzanne/rm_depth_sand_color.png" alt="rm_depth_sand_color"><figcaption>rm_depth_sand_color</figcaption></figure>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h2 class="slide-title grad-text">Results</h2>
+      <h3 class="sub">R2 机器人</h3>
+      <p class="dim">6.6 万面、13 个非封闭部件、2048² 贴图。实心化 v2 预处理。</p>
+      <div class="tblwrap">
+        <table class="data">
+          <thead>
+            <tr><th>网络</th><th>RM 总时长 (s)</th><th>RM 网络 (s)</th><th>RM 零网络查询占比</th><th>RM 平均深度</th><th>RM 时长比</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>baseline (无纹理)</td><td class="num">3.80</td><td class="num">3.48</td><td class="num">0.000</td><td class="num">8.00</td><td>—</td></tr>
+            <tr><td>SAND (无纹理)</td><td class="num">9.82</td><td class="num">4.42</td><td class="num">0.916</td><td class="num">3.95</td><td class="best">2.58x</td></tr>
+            <tr><td>SAND+纹理扩展</td><td class="num">9.36</td><td class="num">4.41</td><td class="num">0.884</td><td class="num">6.32</td><td class="best">2.46x</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h3 class="sub">R2 机器人 · 渲染结果</h3>
+      <div class="panelgrid">
+        <div class="prow" style="background:transparent;border:none;padding:0 14px;">
+          <div class="pname"></div><div class="phead">Ray Marching</div><div class="phead">RM 深度图</div>
+        </div>
+        <div class="prow">
+          <div class="pname">baseline (无纹理)</div>
+          <figure class="shot"><img src="report/r2/rm_base_geo.png" alt="rm_base_geo"><figcaption>rm_base_geo</figcaption></figure>
+          <div class="dash">—</div>
+        </div>
+        <div class="prow">
+          <div class="pname">SAND (无纹理)</div>
+          <figure class="shot"><img src="report/r2/rm_sand_geo.png" alt="rm_sand_geo"><figcaption>rm_sand_geo</figcaption></figure>
+          <figure class="shot"><img src="report/r2/rm_depth_sand_geo.png" alt="rm_depth_sand_geo"><figcaption>rm_depth_sand_geo</figcaption></figure>
+        </div>
+        <div class="prow">
+          <div class="pname">SAND+纹理扩展</div>
+          <figure class="shot"><img src="report/r2/rm_sand_color.png" alt="rm_sand_color"><figcaption>rm_sand_color</figcaption></figure>
+          <figure class="shot"><img src="report/r2/rm_depth_sand_color.png" alt="rm_depth_sand_color"><figcaption>rm_depth_sand_color</figcaption></figure>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h3 class="sub">训练开销</h3>
+      <div class="tblwrap">
+        <table class="data">
+          <thead>
+            <tr><th>模型</th><th>网络</th><th>参数量</th><th>迭代数</th><th>训练时长 (s)</th><th>ms/iter</th><th>最终 loss</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Suzanne 猴头</td><td>baseline (无纹理)</td><td class="num">461825</td><td class="num">10000</td><td class="num">1603.86</td><td class="num">160.39</td><td class="num">0.006387</td></tr>
+            <tr><td>Suzanne 猴头</td><td>SAND (无纹理)</td><td class="num">465423</td><td class="num">10000</td><td class="num">2829.50</td><td class="num">282.95</td><td class="num">0.008446</td></tr>
+            <tr><td>Suzanne 猴头</td><td>SAND+纹理扩展</td><td class="num">476988</td><td class="num">10000</td><td class="num">2268.58</td><td class="num">226.86</td><td class="num">0.492926</td></tr>
+            <tr><td>R2 机器人</td><td>baseline (无纹理)</td><td class="num">461825</td><td class="num">10000</td><td class="num">1600.17</td><td class="num">160.02</td><td class="num">0.064338</td></tr>
+            <tr><td>R2 机器人</td><td>SAND (无纹理)</td><td class="num">465423</td><td class="num">10000</td><td class="num">2081.81</td><td class="num">208.18</td><td class="num">0.008331</td></tr>
+            <tr><td>R2 机器人</td><td>SAND+纹理扩展</td><td class="num">476988</td><td class="num">10000</td><td class="num">2261.68</td><td class="num">226.17</td><td class="num">0.349134</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner narrow">
+      <h3 class="sub">Explanation</h3>
+      <p>baseline 即直接同规模网络拟合距离场。</p>
+      <p><strong>为什么我们的比 baseline 慢?</strong></p>
+      <ol class="points">
+        <li>最重要的:baseline 在震荡同规模缺少 octtree 的策略,需要拟合整个空间,结果压根没收敛,导致平均 marching 次数远小于收敛了的 sand</li>
+        <li>baseline 的 batch 开的比较大</li>
+      </ol>
+    </div>
+  </div>
+  <div class="slide">
+      <h3 class="sub">Code Files</h3>
+      <figure class="shot"><img src="report/tree.png" alt="file tree" style="height:100%;"></figure>
+  </div>
+</section>
+
+<!-- ================= Section 3 · Technique ================= -->
+<section data-title="Technique">
+  <div class="slide">
+    <div class="inner">
+      <h2 class="slide-title grad-text">Technique</h2>
+      <p class="dim">论文使用的技术,和我们使用的技术。</p>
+      <h3 class="sub">Octtree</h3>
+      <p>在空间中建立八叉树,每个节点代表空间中的一个立方体,其八个儿子是把自己的空间分成八个子立方体。</p>
+      <p>建树时,<strong>当且仅当模型表面与当前立方体有交时进行细分</strong>,可以快速过滤掉模型内部/外部的空间,精细化训练模型表面附近的空间,使得拟合更为精细。</p>
+      <div class="twocol">
+        <div class="usecase">
+          <div class="t">生成神经网络的训练集</div>
+          允许我们在靠近模型表面的空间采样,聚焦表面细节训练,不用拟合通过 Octree 过滤掉的空间远处的情况。
+        </div>
+        <div class="usecase">
+          <div class="t">决定网络推理深度</div>
+          见后。
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h3 class="sub">New Network Structure</h3>
+      <p>传统的 MLP 拟合模型必须跑完整个深度,即使某处模型的表达很简单(比如,可线性表达的平面)。论文将 MLP 模型改造为 <strong>T-MLP</strong>:</p>
+      <div class="formula-cmp">
+        <div class="formula">
+          <span class="flabel">原始 MLP</span>
+          $$
+          \begin{gathered}
+          \vec x_k=\operatorname{F}(W_k\vec x_{k-1}+\vec b_k) \\
+          L=\|\vec x_n-\vec x^\star\|
+          \end{gathered}
+          $$
+        </div>
+        <div class="formula big">
+          <span class="flabel">T-MLP(论文改造)</span>
+          $$
+          \begin{aligned}
+          \vec x_k&=\operatorname{F}(W_k\vec x_{k-1}+\vec b_k) \\
+          \vec y_1&=O \vec x_1+\vec b_o \\
+          \forall k>1,\vec y_k&=(O_{k,1}\vec x_k+\vec b_{k,1})*(O_{k,2}\vec x_k+\vec b_{k,2})+y_{k-1}\\
+          L_k&=\|\vec y_n-\vec y^\star\| \\
+          L&=\sum_k L_k
+          \end{aligned}
+          $$
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner narrow">
+      <h3 class="sub">New Network Structure</h3>
+      <p>显然这是改为<strong>后面的层拟合残差</strong>,这样越往后越是精确逼近。</p>
+      <p>注意激活函数 $F(x)$ 一般取 $\sin \omega x$,第三行用的是对应项相乘。论文说是为了解决残差过小,且实验这样更优。</p>
+      <p class="dim">也许还有浅层神经网络不善于拟合点积的原因。</p>
+      <p>网络训练好,提前对每个 Octtree 叶子节点存储需要递推的层数:</p>
+      <ul class="clean">
+        <li>对近表面节点:在节点内取样,取对于给定误差,每个点所需推理层数的最大值,作为以后该节点内推理深度。</li>
+        <li>对远表面节点:直接存节点中心距离。</li>
+      </ul>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner narrow">
+      <h3 class="sub">Texture</h3>
+      <p>原论文是不带颜色的,我们给标准的距离场基础上<strong>增加了 rgb 通道的拟合</strong>,一起训练,使得支持渲染有纹理的模型。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Section 4 · Bugs ================= -->
+<section data-title="Bugs">
+  <div class="slide">
+    <div class="inner">
+      <h2 class="slide-title grad-text">Bugs</h2>
+      <h3 class="sub">Bad Model</h3>
+      <div class="bug">
+        <p>一开始选了个神秘奇异模型。注意到模型常常不是单个联通集。我们使用高斯环绕数判断点在内部还是外部,但仍然遇到了一些错综复杂的面使得内外混到一起了,导致渲染有类似穿模现象。</p>
+        <span class="fix">解决方案:换一个好模型。</span>
+        <span class="fix">解决方案:单侧光照/渲染颜色</span>
+      </div>
+      <div class="duo">
+        <figure class="shot"><img src="report/robot_union2/rm_sand_color.png" alt="bad_model"><figcaption>bad_model</figcaption></figure>
+        <figure class="shot"><img src="report/rm_sand_color.png" alt="good_bad_model"><figcaption>good_bad_model</figcaption></figure>
+      </div>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner">
+      <h3 class="sub">Wrong Direction of Normal Vector</h3>
+      <div class="bug">
+        <p>我们发现渲染结果有神秘噪点:当使用 ray marching 算法时,我们是通过有限差分求距离场的梯度算的表面法向量。而梯度方向可能朝外或朝内,<strong>朝内的表面无光照到表现为黑噪点</strong>。</p>
+        <span class="fix">解决方案:注意到能看到的表面的法向量一定与相机同侧。</span>
+      </div>
+      <div class="duo">
+        <figure class="shot"><img src="report/other/black_points.png" alt="black_points"><figcaption>black_points</figcaption></figure>
+        <figure class="shot"><img src="report/other/black_points_fixed.png" alt="black_points_fixed"><figcaption>black_points_fixed</figcaption></figure>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= Section 5 · Play & Thanks ================= -->
+<section data-title="Play &amp; Thanks">
+  <div class="slide">
+    <div class="inner center">
+      <h2 class="slide-title grad-text" style="justify-content:center;">Play time</h2>
+      <p class="dim">在线交互渲染器,亲自试试。</p>
+      <p><a class="play-btn" href="http://124.222.61.175:16200/" target="_blank" rel="noopener">▶ Play</a></p>
+    </div>
+  </div>
+  <div class="slide">
+    <div class="inner center">
+      <div class="thanks-big grad-text">Thanks</div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<div id="arrows">
+  <span class="a-up">▲</span><span class="a-left">◀</span><span class="a-down">▼</span><span class="a-right">▶</span>
+</div>
+<div id="hint">← → ↑ ↓ / Space / 点击屏幕 翻页</div>
+<div id="lightbox"><img alt="preview"></div>
+
+<script src="vendor/katex.min.js"></script>
+<script src="vendor/contrib/auto-render.min.js"></script>
+<script src="vendor/three.min.js"></script>
+<script>
+/* ============ KaTeX ============ */
+renderMathInElement(document.body, {
+  delimiters: [
+    { left: '$$', right: '$$', display: true },
+    { left: '$', right: '$', display: false },
+  ],
+  throwOnError: false,
+});
+
+/* ============ Deck 引擎:横向 section × 纵向 slide(reveal.js 式二维移动) ============ */
+const sections = [...document.querySelectorAll('.deck > section')].map(sec => ({
+  title: sec.dataset.title,
+  slides: [...sec.querySelectorAll('.slide')],
+}));
+const totalPages = sections.reduce((n, s) => n + s.slides.length, 0);
+let si = 0, vi = 0;
+
+function flatIndex(s, v) {
+  let n = 0;
+  for (let i = 0; i < s; i++) n += sections[i].slides.length;
+  return n + v;
+}
+
+/* 顶栏:section 标题按页数比例分布在进度条轨道上 */
+const track = document.getElementById('track');
+const segEls = [];
+sections.forEach((s, i) => {
+  const el = document.createElement('span');
+  el.className = 'seg';
+  /* 标题位于该 section 首页对应的进度位置 */
+  el.style.left = ((flatIndex(i, 0) / (totalPages - 1)) * 100).toFixed(3) + '%';
+  el.innerHTML = `<span class="lbl">${s.title}</span><span class="dot"></span>`;
+  el.addEventListener('click', ev => {
+    ev.stopPropagation();
+    go(i, 0, i > si ? 'h-fwd' : 'h-back');
+  });
+  track.appendChild(el);
+  segEls.push(el);
+});
+const pageInfo = document.createElement('span');
+pageInfo.className = 'pageinfo';
+track.appendChild(pageInfo);
+const barfill = document.getElementById('barfill');
+
+function updateChrome() {
+  const idx = flatIndex(si, vi);
+  segEls.forEach((el, i) => {
+    el.classList.toggle('cur', i === si);
+    el.classList.toggle('reached', flatIndex(i, 0) <= idx);
+  });
+  pageInfo.innerHTML = `<b>${idx + 1}</b> / ${totalPages}`;
+  /* 进度按页推进:当前页走到其对应的进度位置 */
+  barfill.style.width = ((idx / (totalPages - 1)) * 100).toFixed(3) + '%';
+  const canPrev = si > 0 || vi > 0;
+  const canNext = si < sections.length - 1 || vi < sections[si].slides.length - 1;
+  document.querySelector('#arrows .a-up').classList.toggle('on', vi > 0);
+  document.querySelector('#arrows .a-down').classList.toggle('on', vi < sections[si].slides.length - 1);
+  document.querySelector('#arrows .a-left').classList.toggle('on', canPrev);
+  document.querySelector('#arrows .a-right').classList.toggle('on', canNext);
+  history.replaceState(null, '', `#/${si}/${vi}`);
+}
+
+function go(nsi, nvi, dir) {
+  const cur = sections[si].slides[vi];
+  const nxt = sections[nsi].slides[nvi];
+  if (!nxt || cur === nxt) return;
+  /* 旧页反向滑出,新页一次性滑入(先快后慢) */
+  cur.classList.remove('active');
+  delete cur.dataset.cur;
+  cur.classList.add('exit-' + dir);
+  nxt.classList.add('active', 'enter-' + dir);
+  nxt.dataset.cur = '1';                    /* 标记当前页,防止快速连翻时被旧 timeout 误清 */
+  si = nsi; vi = nvi;
+  updateChrome();
+  setTimeout(() => {
+    document.querySelectorAll('.slide').forEach(sl => {
+      if (sl.dataset.cur) {
+        sl.classList.remove('enter-h-fwd', 'enter-h-back', 'enter-v-fwd', 'enter-v-back');
+      } else {
+        sl.classList.remove('active', 'exit-h-fwd', 'exit-h-back', 'exit-v-fwd', 'exit-v-back',
+                            'enter-h-fwd', 'enter-h-back', 'enter-v-fwd', 'enter-v-back');
+      }
+    });
+  }, 0);
+}
+
+function next() {
+  if (vi < sections[si].slides.length - 1) go(si, vi + 1, 'v-fwd');
+  else if (si < sections.length - 1) go(si + 1, 0, 'h-fwd');
+}
+function prev() {
+  if (vi > 0) go(si, vi - 1, 'v-back');
+  else if (si > 0) go(si - 1, sections[si - 1].slides.length - 1, 'h-back');
+}
+
+addEventListener('keydown', e => {
+  if (document.getElementById('lightbox').classList.contains('open')) {
+    if (e.key === 'Escape' || e.key === ' ') {
+      e.preventDefault();
+      document.getElementById('lightbox').classList.remove('open');
+    }
+    return;                                    /* lightbox 打开时不翻页 */
+  }
+  if (['ArrowRight', 'ArrowDown', ' ', 'PageDown', 'Enter'].includes(e.key)) { e.preventDefault(); next(); }
+  else if (['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'].includes(e.key)) { e.preventDefault(); prev(); }
+  else if (e.key === 'Home') go(0, 0, 'h-back');
+  else if (e.key === 'End') go(sections.length - 1, sections[sections.length - 1].slides.length - 1, 'h-fwd');
+});
+
+/* 点击翻页(大屏放映):右半屏下一页,左半屏上一页;链接/按钮/图片上不触发 */
+addEventListener('click', e => {
+  if (document.getElementById('lightbox').classList.contains('open')) return;
+  if (e.target.closest('a, button, .seg, #topbar, #arrows, figure.shot img')) return;
+  const x = e.clientX / innerWidth;
+  if (x >= 0.5) next(); else prev();
+});
+
+/* 图片点击放大(lightbox):拦截点击,不翻页 */
+const lightbox = document.getElementById('lightbox');
+const lightboxImg = lightbox.querySelector('img');
+document.querySelectorAll('figure.shot img').forEach(img => {
+  img.addEventListener('click', e => {
+    e.stopPropagation();
+    lightboxImg.src = img.src;
+    lightbox.classList.add('open');
+  });
+});
+lightbox.addEventListener('click', e => {
+  e.stopPropagation();
+  lightbox.classList.remove('open');
+});
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') lightbox.classList.remove('open');
+});
+
+/* 触摸滑动 */
+let tx = 0, ty = 0;
+addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive: true });
+addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 48) return;
+  if (Math.abs(dx) > Math.abs(dy)) (dx < 0 ? next() : prev());
+  else (dy < 0 ? next() : prev());
+}, { passive: true });
+
+/* 初始页:支持 #/s/v 定位 */
+(function init() {
+  const m = location.hash.match(/^#\/(\d+)\/(\d+)$/);
+  if (m) {
+    si = Math.min(+m[1], sections.length - 1);
+    vi = Math.min(+m[2], sections[si].slides.length - 1);
+  }
+  sections[si].slides[vi].classList.add('active');
+  sections[si].slides[vi].dataset.cur = '1';
+  updateChrome();
+})();
+
+/* ============ Three.js 背景:漂浮线框八面体 ============ */
+(function () {
+  if (typeof THREE === 'undefined') return;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const canvas = document.getElementById('bg3d');
+  const renderer3 = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  renderer3.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene();
+  const cam = new THREE.PerspectiveCamera(55, 1, .1, 100);
+  cam.position.z = 14;
+
+  const group = new THREE.Group();
+  scene.add(group);
+  const matA = () => new THREE.MeshBasicMaterial({ color: 0x63b3ed, wireframe: true, transparent: true, opacity: .20 });
+  const matB = () => new THREE.MeshBasicMaterial({ color: 0x3182ce, wireframe: true, transparent: true, opacity: .12 });
+  const meshes = [];
+  for (let i = 0; i < 16; i++) {
+    const size = .5 + Math.random() * 1.8;
+    const m = new THREE.Mesh(new THREE.OctahedronGeometry(size, 0), Math.random() < .5 ? matA() : matB());
+    m.position.set((Math.random() - .5) * 26, (Math.random() - .5) * 16, (Math.random() - .5) * 8 - 2);
+    m.userData = { rx: (Math.random() - .5) * .006, ry: (Math.random() - .5) * .008, ph: Math.random() * Math.PI * 2, y0: m.position.y, sp: .3 + Math.random() * .6 };
+    group.add(m); meshes.push(m);
+  }
+
+  let mx = 0, my = 0;
+  addEventListener('mousemove', e => {
+    mx = (e.clientX / innerWidth - .5); my = (e.clientY / innerHeight - .5);
+  }, { passive: true });
+
+  function resize() {
+    renderer3.setSize(innerWidth, innerHeight, false);
+    cam.aspect = innerWidth / innerHeight;
+    cam.updateProjectionMatrix();
+  }
+  addEventListener('resize', resize); resize();
+
+  const clock = new THREE.Clock();
+  (function loop() {
+    requestAnimationFrame(loop);
+    const t = clock.getElapsedTime();
+    meshes.forEach(m => {
+      m.rotation.x += m.userData.rx; m.rotation.y += m.userData.ry;
+      m.position.y = m.userData.y0 + Math.sin(t * m.userData.sp + m.userData.ph) * .8;
+    });
+    group.rotation.y += (mx * .25 - group.rotation.y) * .04;
+    group.rotation.x += (my * .15 - group.rotation.x) * .04;
+    renderer3.render(scene, cam);
+  })();
+})();
+</script>
+</body>
+</html>

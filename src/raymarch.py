@@ -54,7 +54,17 @@ from .render import _camera, _RADIUS, _HALF_DIAG, _FIT_MARGIN, _AMBIENT, \
 
 _SQRT3_HALF = math.sqrt(3.0) / 2.0
 _LEAP_NUDGE = 1e-6      # push past the cell boundary after a far-leaf leap
-_NORMAL_EPS = 2e-3      # central-difference offset for shading normals
+# Central-difference offset for normal estimation. Larger than the original
+# 2e-3 because the SIREN field oscillates on sub-voxel scales; a 2e-3 step
+# samples that noise, producing jittered normals that show up as isolated black
+# speckle under single-sided Lambert. 8e-3 averages over the jitter while still
+# being well inside a cell (~1/256 of the unit cube).
+_NORMAL_EPS = 8e-3
+# SDF-gradient magnitude below this is treated as a degenerate normal
+# (thin features / silhouettes where the 6-neighbor gradient is unreliable).
+# Such points fall back to the ray-direction normal so they don't spike black
+# under single-sided Lambert.
+_NORMAL_GMIN = 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -449,8 +459,18 @@ def _trace(field, eye: torch.Tensor, dirs: torch.Tensor, t0: torch.Tensor,
 
 
 @torch.no_grad()
-def _shade_normals(field, pts: torch.Tensor) -> torch.Tensor:
-    """Unit outward normals at hit points via central differences (6 queries)."""
+def _shade_normals(field, pts: torch.Tensor,
+                   view_dirs: torch.Tensor | None = None) -> torch.Tensor:
+    """Outward normals at hit points via central differences (6 queries).
+
+    With ``view_dirs`` (the hit ray directions) supplied, applies the same
+    stabilization as ``script.viz_render._stable_normals``: degenerate-gradient
+    points fall back to ``-view_dirs``, and any normal pointing away from the
+    camera is flipped, so single-sided Lambert does not spike black on the
+    ~1% of hits whose SDF gradient is sign-inverted or near-zero. Without
+    ``view_dirs`` the legacy raw gradient is returned (callers that only need
+    a magnitude-agnostic orientation still work).
+    """
     offs = torch.tensor([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
                          [0, 0, 1], [0, 0, -1]], dtype=torch.float32,
                         device=pts.device) * _NORMAL_EPS
@@ -459,8 +479,17 @@ def _shade_normals(field, pts: torch.Tensor) -> torch.Tensor:
     g = torch.stack([sdf[0::6] - sdf[1::6],
                      sdf[2::6] - sdf[3::6],
                      sdf[4::6] - sdf[5::6]], dim=1) / (2.0 * _NORMAL_EPS)
-    nrm = torch.linalg.norm(g, dim=1, keepdim=True).clamp(min=1e-12)
-    return (g / nrm).float()
+    gmag = torch.linalg.norm(g, dim=1, keepdim=True).clamp(min=1e-12)
+    n = (g / gmag).float()
+    if view_dirs is None:
+        return n
+    degenerate = (gmag.squeeze(1) < _NORMAL_GMIN).unsqueeze(1)
+    fallback = (-view_dirs).float()
+    n = torch.where(degenerate, fallback, n)
+    facing = (n * (-view_dirs).float()).sum(dim=1, keepdim=True)
+    inward = facing < 0
+    n = torch.where(inward, -n, n)
+    return n
 
 
 def _save_png(img: np.ndarray, out_path: str, bg, title) -> None:
@@ -524,9 +553,15 @@ def render_raymarch(field, out_path, img_size=800, elev=25.0, azim=45.0,
     depth_map = np.zeros((H, W), dtype=np.float64)
     if hit_ids.numel():
         p_hit = eye + t_hit[hit_ids, None] * dirs_v[hit_ids]
-        normals = _shade_normals(field, p_hit)
-        lam = _AMBIENT + (1.0 - _AMBIENT) * torch.abs(
-            (normals * -dirs_v[hit_ids]).sum(dim=1))
+        view_dirs = dirs_v[hit_ids]
+        normals = _shade_normals(field, p_hit, view_dirs)
+        # Single-sided Lambert: only faces turned toward the light are lit; back
+        # faces go dark (clamped to 0). Matches the browser visualizer's
+        # shading; the earlier abs() lit back faces, which hid the
+        # inward-facing surfaces that indicate self-intersection artifacts.
+        ldir = -view_dirs  # headlight: light travels along the view ray
+        diffuse = torch.clamp((normals * ldir).sum(dim=1), min=0.0)
+        lam = _AMBIENT + (1.0 - _AMBIENT) * diffuse
         if rgb_hit is not None:
             base = rgb_hit[hit_ids]
         else:
