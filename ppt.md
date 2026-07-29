@@ -1,5 +1,7 @@
 # SAND: Spatially Adaptive Network Depth for Fast Sampling of Neural Implicit Surfaces
 
+13 组 · 孔德玮 · 颜祖一
+
 ## Introduction: Implicit neural representations
 
 我们要解决的核心问题是如何快速准确的渲染一个模型.
@@ -15,6 +17,13 @@
 优势:无损表达光滑表面,利用泛化能力减小存储消耗
 
 ## Results
+
+### Conditions
+
+实验复现条件
+
+1. 原论文 RTX4090 → GTX1650(my computer)
+2. 分辨率:512³ → 256³
 
 ### Suzanne 猴头
 
@@ -67,6 +76,10 @@ baseline即直接同规模网络拟合距离场
 1. 最重要的:baseline在震荡同规模缺少octtree的策略,需要拟合整个空间,结果压根没收敛,导致平均marching次数远小于收敛了的sand
 2. baseline的batch开的比较大
 
+### Code Files
+
+![file tree](report/tree.png)
+
 ## Technique
 
 论文使用的技术,和我们使用的技术
@@ -115,7 +128,7 @@ $$
 
 网络训练好,提前对每个Octtree叶子节点存储需要递推的层数:
 - 对近表面节点:在节点内取样,取对于给定误差,每个点所需推理层数的最大值,作为以后该节点内推理深度.
-- 对远表面节点:直接存节点内中心距离.
+- 对远表面节点:直接存节点中心距离.
 
 ### Texture
 
@@ -125,11 +138,13 @@ $$
 
 ### Bad Model
 
-一开始选了个神秘奇异模型.注意到模型常常不是单个联通集.我们使用高斯环绕数判断点在内部还是外部,但仍然遇到了一些错综复杂的面使得内外混到一起了,导致渲染有穿模现象.
+一开始选了个神秘奇异模型.注意到模型常常不是单个联通集.我们使用高斯环绕数判断点在内部还是外部,但仍然遇到了一些错综复杂的面使得内外混到一起了,导致渲染有类似穿模现象.
 
 解决方案:换一个好模型.
+解决方案:单侧光照/渲染颜色.
 
 ![bad_model](report/robot_union2/rm_sand_color.png)
+![good_bad_model](report/rm_sand_color.png)
 
 ### Wrong Direction of Normal Vector
 
@@ -141,6 +156,8 @@ $$
 ![black_points](report/other/black_points_fixed.png)
 
 ## Play time
+
+在线交互渲染器,亲自试试。
 
 [Play](http://124.222.61.175:16200/)
 
